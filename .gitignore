@@ -1,0 +1,25 @@
+# Rust build output
+/target/
+**/*.rs.bk
+
+# Packaged Windows artifacts
+*.exe
+*.pdb
+
+# Editor and IDE files
+/.agents/
+/.vs/
+/.vscode/
+/.idea/
+*.suo
+*.user
+*.swp
+*.tmp
+
+# OS metadata
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Local logs
+*.log
