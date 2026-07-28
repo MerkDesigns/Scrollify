@@ -1,4 +1,4 @@
-# Scrollify
+![Scrollify](Assets/banner.png)
 
 Scrollify is a small Windows tray app that adjusts Spotify's Windows volume-mixer session with `Alt + mouse wheel`.
 
