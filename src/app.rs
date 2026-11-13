@@ -20,8 +20,9 @@ use windows::Win32::UI::WindowsAndMessaging::{
 
 use crate::audio::{display_name, AudioWorker, Command, Report};
 use crate::autostart;
+use crate::blocker::Blocker;
 use crate::config::{normalize_step, normalize_targets, ConfigStore, Settings, STEP_INCREMENT_DB};
-use crate::input::{self, WheelAccumulator};
+use crate::input::{self, RawEvent, WheelAccumulator};
 use crate::tray::Tray;
 use crate::ui::d2d::Graphics;
 use crate::ui::overlay::{self, Overlay};
@@ -29,13 +30,16 @@ use crate::ui::panel::{Action, Panel, View};
 
 const WM_TRAY: u32 = WM_APP + 1;
 const WM_AUDIO: u32 = WM_APP + 2;
+const WM_HOOK_WHEEL: u32 = WM_APP + 3;
 const VK_ESCAPE: usize = 0x1B;
 const WM_MOUSELEAVE: u32 = 0x02A3;
 
 static TASKBAR_CREATED: AtomicU32 = AtomicU32::new(0);
 
 enum Event {
-    Wheel(i32),
+    Input(RawEvent),
+    /// Wheel delta from the scroll blocker's hook.
+    HookWheel(i32),
     Tray(u32),
     TaskbarCreated,
     Audio,
@@ -72,6 +76,8 @@ fn dispatch(event: Event) {
 }
 
 struct App {
+    host: HWND,
+    blocker: Blocker,
     gfx: Graphics,
     store: ConfigStore,
     settings: Settings,
@@ -89,7 +95,8 @@ struct App {
 impl App {
     fn handle(&mut self, event: Event) {
         match event {
-            Event::Wheel(delta) => self.on_wheel(delta),
+            Event::Input(raw) => self.on_input(raw),
+            Event::HookWheel(delta) => self.on_wheel(delta),
             Event::Tray(mouse) => self.on_tray(mouse),
             Event::TaskbarCreated => self.tray.add(self.settings.enabled),
             Event::Audio => self.on_audio(),
@@ -112,6 +119,41 @@ impl App {
             Event::PanelClose => self.close_panel(),
             Event::OverlayTick => self.overlay.tick(),
         }
+    }
+
+    fn on_input(&mut self, raw: RawEvent) {
+        if self.settings.block_scroll {
+            let modifier = self.settings.modifier;
+            let held = input::modifier_change(raw, modifier)
+                .unwrap_or_else(|| input::modifier_held(modifier));
+            self.update_blocker(held);
+        }
+        if let RawEvent::Mouse {
+            wheel: Some(delta), ..
+        } = raw
+        {
+            // While the blocker is on, wheel events come from its hook instead.
+            if !self.blocker.is_active() {
+                self.on_wheel(delta);
+            }
+        }
+    }
+
+    /// Installs the scroll blocker while the modifier is held, removes it otherwise.
+    fn update_blocker(&mut self, held: bool) {
+        let s = &self.settings;
+        let want = held && s.enabled && s.block_scroll && !s.targets.is_empty();
+        if want && !self.blocker.is_active() {
+            self.blocker.start(s.modifier);
+        } else if !want && self.blocker.is_active() {
+            self.blocker.stop();
+        }
+    }
+
+    /// Applies a change to the block setting, the modifier or on/off.
+    fn sync_blocker(&mut self) {
+        self.blocker.stop();
+        input::set_keyboard(self.host, self.settings.block_scroll);
     }
 
     fn on_wheel(&mut self, delta: i32) {
@@ -187,8 +229,18 @@ impl App {
             Action::StepUp => {
                 s.volume_step_db = normalize_step(s.volume_step_db + STEP_INCREMENT_DB)
             }
-            Action::ModifierPrev => s.modifier = s.modifier.cycle(false),
-            Action::ModifierNext => s.modifier = s.modifier.cycle(true),
+            Action::ToggleBlock => {
+                s.block_scroll = !s.block_scroll;
+                self.sync_blocker();
+            }
+            Action::ModifierPrev => {
+                s.modifier = s.modifier.cycle(false);
+                self.sync_blocker();
+            }
+            Action::ModifierNext => {
+                s.modifier = s.modifier.cycle(true);
+                self.sync_blocker();
+            }
             Action::ToggleAddList => {
                 self.adding = !self.adding;
                 if self.adding {
@@ -220,6 +272,7 @@ impl App {
     fn set_enabled(&mut self, enabled: bool) {
         self.settings.enabled = enabled;
         self.wheel.reset();
+        self.blocker.stop();
         self.tray.set_enabled(enabled);
         self.store.save(&self.settings);
     }
@@ -236,6 +289,7 @@ impl App {
             enabled: self.settings.enabled,
             start_with_windows: self.start_with_windows,
             show_overlay: self.settings.show_overlay,
+            block_scroll: self.settings.block_scroll,
             step_db: self.settings.volume_step_db,
             modifier: self.settings.modifier,
             targets: &self.settings.targets,
@@ -258,6 +312,7 @@ impl App {
                 enabled: self.settings.enabled,
                 start_with_windows: self.start_with_windows,
                 show_overlay: self.settings.show_overlay,
+                block_scroll: self.settings.block_scroll,
                 step_db: self.settings.volume_step_db,
                 modifier: self.settings.modifier,
                 targets: &self.settings.targets,
@@ -309,7 +364,10 @@ pub fn run() -> windows::core::Result<()> {
 
     let store = ConfigStore::new();
     let settings = store.load();
+    let block_scroll = settings.block_scroll;
     let app = App {
+        host,
+        blocker: Blocker::new(host, WM_HOOK_WHEEL),
         gfx: Graphics::new()?,
         audio: AudioWorker::start(host, WM_AUDIO),
         tray: Tray::new(host, WM_TRAY, settings.enabled),
@@ -325,6 +383,7 @@ pub fn run() -> windows::core::Result<()> {
     };
     APP.with(|slot| *slot.borrow_mut() = Some(app));
     input::register(host)?;
+    input::set_keyboard(host, block_scroll);
 
     unsafe {
         let mut msg = MSG::default();
@@ -396,8 +455,8 @@ unsafe extern "system" fn host_proc(
 ) -> LRESULT {
     match msg {
         WM_INPUT => {
-            if let Some(delta) = input::wheel_delta(lparam) {
-                dispatch(Event::Wheel(delta));
+            if let Some(raw) = input::read(lparam) {
+                dispatch(Event::Input(raw));
             }
             // Required so Windows can clean up the input buffer.
             DefWindowProcW(hwnd, msg, wparam, lparam)
@@ -408,6 +467,10 @@ unsafe extern "system" fn host_proc(
         }
         WM_AUDIO => {
             dispatch(Event::Audio);
+            LRESULT(0)
+        }
+        WM_HOOK_WHEEL => {
+            dispatch(Event::HookWheel(wparam.0 as isize as i32));
             LRESULT(0)
         }
         _ if msg != 0 && msg == TASKBAR_CREATED.load(Ordering::Relaxed) => {

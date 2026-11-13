@@ -3,13 +3,14 @@
 
 //! Scrollify: hold a modifier and scroll to change an app's volume.
 //!
-//! Anti-cheat friendly by design: no input hooks, no simulated input, no
-//! code or memory access in other processes, no process handles, no drivers,
-//! no admin rights.
+//! Anti-cheat friendly by design: no simulated input, no code or memory access
+//! in other processes, no process handles, no drivers, no admin rights. Input
+//! hooks are only used by the optional "Block scroll" setting (off by default).
 
 mod app;
 mod audio;
 mod autostart;
+mod blocker;
 mod config;
 mod input;
 mod single_instance;

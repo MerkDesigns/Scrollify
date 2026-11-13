@@ -10,7 +10,7 @@ impl InstanceLock {
     /// Returns `None` when another instance already holds the lock.
     pub fn acquire() -> Option<Self> {
         unsafe {
-            let handle = CreateMutexW(None, false, w!("Local\\Scrollify.Instance")).ok()?;
+            let handle = CreateMutexW(None, false, w!("Local\\Scrollify.SingleInstance")).ok()?;
             if GetLastError() == ERROR_ALREADY_EXISTS {
                 let _ = CloseHandle(handle);
                 return None;

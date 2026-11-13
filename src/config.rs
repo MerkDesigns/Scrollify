@@ -65,6 +65,8 @@ pub struct Settings {
     pub modifier: Modifier,
     pub targets: Vec<String>,
     pub show_overlay: bool,
+    /// Stop modifier + wheel from also scrolling other apps (uses a hook).
+    pub block_scroll: bool,
 }
 
 impl Default for Settings {
@@ -75,6 +77,7 @@ impl Default for Settings {
             modifier: Modifier::Alt,
             targets: vec![DEFAULT_TARGET.to_string()],
             show_overlay: true,
+            block_scroll: false,
         }
     }
 }
@@ -184,6 +187,7 @@ mod tests {
         assert_eq!(settings.modifier, Modifier::Alt);
         assert_eq!(settings.targets, vec!["Spotify.exe".to_string()]);
         assert!(settings.show_overlay);
+        assert!(!settings.block_scroll);
     }
 
     #[test]

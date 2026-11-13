@@ -1,8 +1,9 @@
-//! Read-only mouse wheel input through Raw Input.
+//! Read-only mouse (and optionally keyboard) input through Raw Input.
 //!
-//! Raw Input only *receives copies* of mouse events. It is not part of any
+//! Raw Input only *receives copies* of input events. It is not part of any
 //! application's input chain, so it cannot block, change or inject input.
-//! There is no global hook and nothing is loaded into other processes.
+//! Nothing is loaded into other processes. (The optional scroll blocker in
+//! `blocker.rs` is the only part that uses a hook, and only while enabled.)
 
 use std::mem::size_of;
 
@@ -13,14 +14,20 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 };
 use windows::Win32::UI::Input::{
     GetRawInputData, RegisterRawInputDevices, HRAWINPUT, RAWINPUT, RAWINPUTDEVICE, RAWINPUTHEADER,
-    RIDEV_INPUTSINK, RIDEV_REMOVE, RID_INPUT, RIM_TYPEMOUSE,
+    RIDEV_INPUTSINK, RIDEV_REMOVE, RID_INPUT, RIM_TYPEKEYBOARD, RIM_TYPEMOUSE,
 };
 
 use crate::config::Modifier;
 
 const USAGE_PAGE_GENERIC: u16 = 0x01;
 const USAGE_MOUSE: u16 = 0x02;
+const USAGE_KEYBOARD: u16 = 0x06;
 const RI_MOUSE_WHEEL: u16 = 0x0400;
+const RI_MOUSE_BUTTON_4_DOWN: u16 = 0x0040;
+const RI_MOUSE_BUTTON_4_UP: u16 = 0x0080;
+const RI_MOUSE_BUTTON_5_DOWN: u16 = 0x0100;
+const RI_MOUSE_BUTTON_5_UP: u16 = 0x0200;
+const RI_KEY_BREAK: u16 = 0x0001;
 const WHEEL_NOTCH: i32 = 120;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -31,29 +38,52 @@ pub enum Direction {
 
 /// Subscribes `hwnd` to mouse raw input, also while other apps have focus.
 pub fn register(hwnd: HWND) -> windows::core::Result<()> {
+    set_device(USAGE_MOUSE, Some(hwnd))
+}
+
+/// Turns keyboard raw input on or off. It is only used to notice when the
+/// modifier key goes down or up (for "Block scroll"); keys are not stored.
+pub fn set_keyboard(hwnd: HWND, on: bool) {
+    let _ = set_device(USAGE_KEYBOARD, on.then_some(hwnd));
+}
+
+pub fn unregister() {
+    let _ = set_device(USAGE_KEYBOARD, None);
+    let _ = set_device(USAGE_MOUSE, None);
+}
+
+/// `Some(hwnd)` subscribes, `None` unsubscribes.
+fn set_device(usage: u16, hwnd: Option<HWND>) -> windows::core::Result<()> {
     let device = RAWINPUTDEVICE {
         usUsagePage: USAGE_PAGE_GENERIC,
-        usUsage: USAGE_MOUSE,
-        dwFlags: RIDEV_INPUTSINK,
-        hwndTarget: hwnd,
+        usUsage: usage,
+        dwFlags: if hwnd.is_some() {
+            RIDEV_INPUTSINK
+        } else {
+            RIDEV_REMOVE
+        },
+        hwndTarget: hwnd.unwrap_or_default(),
     };
     unsafe { RegisterRawInputDevices(&[device], size_of::<RAWINPUTDEVICE>() as u32) }
 }
 
-pub fn unregister() {
-    let device = RAWINPUTDEVICE {
-        usUsagePage: USAGE_PAGE_GENERIC,
-        usUsage: USAGE_MOUSE,
-        dwFlags: RIDEV_REMOVE,
-        hwndTarget: HWND::default(),
-    };
-    unsafe {
-        let _ = RegisterRawInputDevices(&[device], size_of::<RAWINPUTDEVICE>() as u32);
-    }
+/// One raw input event, reduced to what Scrollify needs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RawEvent {
+    Mouse {
+        wheel: Option<i32>,
+        /// `Some(true)` on press, `Some(false)` on release.
+        x1: Option<bool>,
+        x2: Option<bool>,
+    },
+    Key {
+        vk: u16,
+        down: bool,
+    },
 }
 
-/// Reads the vertical wheel delta from a `WM_INPUT` message, if it has one.
-pub fn wheel_delta(lparam: LPARAM) -> Option<i32> {
+/// Reads a `WM_INPUT` message.
+pub fn read(lparam: LPARAM) -> Option<RawEvent> {
     let mut raw = RAWINPUT::default();
     let mut size = size_of::<RAWINPUT>() as u32;
     let read = unsafe {
@@ -65,14 +95,55 @@ pub fn wheel_delta(lparam: LPARAM) -> Option<i32> {
             size_of::<RAWINPUTHEADER>() as u32,
         )
     };
-    if read == u32::MAX || read == 0 || raw.header.dwType != RIM_TYPEMOUSE.0 {
+    if read == u32::MAX || read == 0 {
+        return None;
+    }
+    if raw.header.dwType == RIM_TYPEKEYBOARD.0 {
+        let key = unsafe { raw.data.keyboard };
+        return Some(RawEvent::Key {
+            vk: key.VKey,
+            down: key.Flags & RI_KEY_BREAK == 0,
+        });
+    }
+    if raw.header.dwType != RIM_TYPEMOUSE.0 {
         return None;
     }
     let buttons = unsafe { raw.data.mouse.Anonymous.Anonymous };
-    if buttons.usButtonFlags & RI_MOUSE_WHEEL == 0 {
-        return None;
+    let flags = buttons.usButtonFlags;
+    let state = |down: u16, up: u16| {
+        if flags & down != 0 {
+            Some(true)
+        } else if flags & up != 0 {
+            Some(false)
+        } else {
+            None
+        }
+    };
+    Some(RawEvent::Mouse {
+        wheel: (flags & RI_MOUSE_WHEEL != 0).then_some(buttons.usButtonData as i16 as i32),
+        x1: state(RI_MOUSE_BUTTON_4_DOWN, RI_MOUSE_BUTTON_4_UP),
+        x2: state(RI_MOUSE_BUTTON_5_DOWN, RI_MOUSE_BUTTON_5_UP),
+    })
+}
+
+/// Whether `event` says the modifier went down (`Some(true)`) or up
+/// (`Some(false)`). `None` if the event is about something else.
+pub fn modifier_change(event: RawEvent, modifier: Modifier) -> Option<bool> {
+    match (event, modifier) {
+        (RawEvent::Key { vk, down }, _) => {
+            let matches = match modifier {
+                Modifier::Alt => vk == VK_MENU.0,
+                Modifier::Ctrl => vk == VK_CONTROL.0,
+                Modifier::Shift => vk == VK_SHIFT.0,
+                Modifier::Win => vk == VK_LWIN.0 || vk == VK_RWIN.0,
+                Modifier::Mouse4 | Modifier::Mouse5 => false,
+            };
+            matches.then_some(down)
+        }
+        (RawEvent::Mouse { x1, .. }, Modifier::Mouse4) => x1,
+        (RawEvent::Mouse { x2, .. }, Modifier::Mouse5) => x2,
+        _ => None,
     }
-    Some(buttons.usButtonData as i16 as i32)
 }
 
 /// True while the chosen key or mouse button is held. Only reads key state.
@@ -125,6 +196,23 @@ impl WheelAccumulator {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn modifier_changes_are_detected() {
+        let alt_down = RawEvent::Key {
+            vk: 0x12,
+            down: true,
+        };
+        assert_eq!(modifier_change(alt_down, Modifier::Alt), Some(true));
+        assert_eq!(modifier_change(alt_down, Modifier::Ctrl), None);
+        let x1_up = RawEvent::Mouse {
+            wheel: None,
+            x1: Some(false),
+            x2: None,
+        };
+        assert_eq!(modifier_change(x1_up, Modifier::Mouse4), Some(false));
+        assert_eq!(modifier_change(x1_up, Modifier::Mouse5), None);
+    }
 
     #[test]
     fn whole_notches_map_to_steps() {

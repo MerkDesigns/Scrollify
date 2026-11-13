@@ -33,6 +33,7 @@ pub enum Action {
     ToggleEnabled,
     ToggleStartup,
     ToggleOverlay,
+    ToggleBlock,
     StepDown,
     StepUp,
     ModifierPrev,
@@ -48,6 +49,7 @@ pub struct View<'a> {
     pub enabled: bool,
     pub start_with_windows: bool,
     pub show_overlay: bool,
+    pub block_scroll: bool,
     pub step_db: f32,
     pub modifier: Modifier,
     pub targets: &'a [String],
@@ -170,7 +172,7 @@ fn content_height(view: &View) -> f32 {
     } else {
         0.0
     };
-    HEADER_H + 4.0 * ROW_H + SECTION_H + targets + adding + 12.0 + QUIT_H + PAD
+    HEADER_H + 5.0 * ROW_H + SECTION_H + targets + adding + 12.0 + QUIT_H + PAD
 }
 
 fn paint(
@@ -232,13 +234,25 @@ fn paint(
     let mut y = HEADER_H;
 
     // Switch rows.
-    for (label, on, action) in [
+    for (label, note, on, action) in [
         (
             "Start with Windows",
+            None,
             view.start_with_windows,
             Action::ToggleStartup,
         ),
-        ("Volume popup", view.show_overlay, Action::ToggleOverlay),
+        (
+            "Volume popup",
+            None,
+            view.show_overlay,
+            Action::ToggleOverlay,
+        ),
+        (
+            "Block scroll in apps",
+            Some("Uses a mouse hook while the key is held"),
+            view.block_scroll,
+            Action::ToggleBlock,
+        ),
     ] {
         let row = Rect::new(PAD, y, W - 2.0 * PAD, ROW_H);
         let color = if is_hover(&action) {
@@ -246,7 +260,13 @@ fn paint(
         } else {
             theme::TEXT
         };
-        c.text(label, Rect::new(row.x, y, 180.0, ROW_H), LABEL, color);
+        if let Some(note) = note {
+            c.text(label, Rect::new(row.x, y + 4.0, 200.0, 20.0), LABEL, color);
+            let note_rect = Rect::new(row.x, y + 22.0, 210.0, 16.0);
+            c.text(note, note_rect, NOTE, theme::TEXT_FAINT);
+        } else {
+            c.text(label, Rect::new(row.x, y, 180.0, ROW_H), LABEL, color);
+        }
         switch(c, Rect::new(W - PAD - 40.0, y + 11.0, 40.0, 22.0), on);
         hits.push((row, action));
         y += ROW_H;
@@ -393,6 +413,7 @@ fn paint(
     hits.push((quit, Action::Quit));
 }
 
+const NOTE: TextStyle = TextStyle::new(10.5, 400, Align::Left);
 const SMALL_CENTER: TextStyle = TextStyle::new(11.5, 600, Align::Center);
 
 fn divider(c: &mut Canvas, y: f32) {
