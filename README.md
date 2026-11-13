@@ -1,22 +1,51 @@
 ![Scrollify](Assets/banner.png)
 
-Scrollify is a small Windows tray app that adjusts Spotify's Windows volume-mixer session with `Alt + mouse wheel`.
+Scrollify is a small Windows tray app: hold a key and scroll the mouse wheel to change the volume of
+Spotify (or any other app you choose) in the Windows volume mixer.
 
 ## Behavior
 
-- `Alt + wheel up` increases Spotify's volume.
-- `Alt + wheel down` decreases Spotify's volume.
-- Left-clicking the tray icon enables or disables Scrollify.
-- Right-clicking the tray icon opens or closes the settings panel.
-- Mouse input always continues to the active application.
+- `Alt + wheel up` raises the volume, `Alt + wheel down` lowers it. The key can be changed to Ctrl,
+  Shift, Win, Mouse 4 or Mouse 5.
+- Every app in the **Apps** list is changed together, on every active output device. The default
+  list is `Spotify.exe`. Use **+ Add** to pick from the apps that are playing audio right now.
+- Each notch changes the volume by the **Volume step** (0.5 to 12 dB).
+- An optional popup at the bottom of the screen shows the new volume and fades out.
+- The scroll still reaches the window under the mouse.
+- Left-click the tray icon to turn Scrollify on or off. Right-click it to open the settings panel.
+  The panel closes when you click elsewhere, press `Esc` or right-click it.
+- Only one copy of Scrollify runs at a time.
 
-Scrollify changes only `Spotify.exe` audio sessions. It does not inspect or modify other processes, switch windows, or generate input.
+## Settings panel
+
+- **ON / OFF**: turns Scrollify on or off.
+- **Start with Windows**: starts Scrollify when you sign in.
+- **Volume popup**: shows or hides the volume popup.
+- **Volume step**: how much each notch changes the volume (0.5 to 12 dB).
+- **Hold while scrolling**: the key or mouse button to hold (Alt, Ctrl, Shift, Win, Mouse 4, Mouse 5).
+- **Apps**: the apps whose volume changes. Click **×** to remove one, or **+ Add** to pick from the
+  apps that are playing audio right now.
+- **Quit**: closes Scrollify.
+
+## Anti-cheat safety
+
+Scrollify only uses ordinary, documented Windows APIs that many desktop apps use:
+
+- **No input hooks.** The wheel is read with Raw Input (`RegisterRawInputDevices`), which receives a
+  copy of mouse events. It cannot block, change or create input.
+- **No simulated input.** Nothing calls `SendInput` or similar APIs.
+- **No process access.** Scrollify never opens a handle to another process. It identifies apps from
+  their audio session IDs, so it never touches a game's process.
+- **No injection or overlays inside games.** The volume popup is a normal top-most window. It doesn't
+  appear over exclusive-fullscreen games.
+- No drivers, no admin rights and no global hotkeys.
+
+Volume changes go through the Windows Core Audio session API, which is the same one the Windows volume
+mixer uses.
 
 ## Requirements
 
 - Windows 10 or 11
-- Spotify for Windows
-- Microsoft Edge WebView2 Runtime
 
 ## Build
 
@@ -24,43 +53,37 @@ Scrollify changes only `Spotify.exe` audio sessions. It does not inspect or modi
 cargo build --release
 ```
 
-The portable executable is created at:
-
-```text
-target\release\scrollify.exe
-```
-
-Icons and panel assets are embedded in the executable.
+The portable executable is created at `target\release\scrollify.exe`. Icons and images are built into the executable.
 
 ## Shortcuts
 
-On launch, Scrollify creates or refreshes this per-user Start Menu shortcut:
+On launch, Scrollify creates or refreshes `%APPDATA%\Microsoft\Windows\Start Menu\Programs\Scrollify.lnk`
+so it can be found with Windows search and pinned to Start.
 
-```text
-%APPDATA%\Microsoft\Windows\Start Menu\Programs\Scrollify.lnk
-```
-
-This makes Scrollify searchable in Windows and allows it to be pinned to Start.
-
-The **Start with Windows** setting manages:
-
-```text
-%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup\Scrollify.lnk
-```
-
-No administrator privileges are required.
+**Start with Windows** manages `%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup\Scrollify.lnk`.
+No registry changes, no administrator rights.
 
 ## Configuration
 
-Settings are stored in:
+Settings are stored in `%APPDATA%\Scrollify\config.json`:
 
-```text
-%APPDATA%\Scrollify\config.json
+```json
+{
+  "enabled": true,
+  "volume_step_db": 1.0,
+  "modifier": "alt",
+  "targets": ["Spotify.exe"],
+  "show_overlay": true
+}
 ```
+
+`modifier` is one of `alt`, `ctrl`, `shift`, `win`, `mouse4` or `mouse5`. Missing fields get their
+defaults.
 
 ## Development
 
 ```powershell
 cargo fmt
-cargo clippy -- -D warnings
+cargo clippy --all-targets -- -D warnings
+cargo test
 ```

@@ -1,29 +1,29 @@
-use crate::util::to_wide;
+//! Keeps a second copy of Scrollify from starting.
+
+use windows::core::w;
 use windows::Win32::Foundation::{CloseHandle, GetLastError, ERROR_ALREADY_EXISTS, HANDLE};
 use windows::Win32::System::Threading::CreateMutexW;
 
-pub struct SingleInstance {
-    handle: HANDLE,
-}
+pub struct InstanceLock(HANDLE);
 
-impl SingleInstance {
-    pub fn acquire() -> windows::core::Result<Option<Self>> {
+impl InstanceLock {
+    /// Returns `None` when another instance already holds the lock.
+    pub fn acquire() -> Option<Self> {
         unsafe {
-            let name = to_wide("Local\\Scrollify.SingleInstance");
-            let handle = CreateMutexW(None, true, windows::core::PCWSTR(name.as_ptr()))?;
+            let handle = CreateMutexW(None, false, w!("Local\\Scrollify.Instance")).ok()?;
             if GetLastError() == ERROR_ALREADY_EXISTS {
                 let _ = CloseHandle(handle);
-                return Ok(None);
+                return None;
             }
-            Ok(Some(Self { handle }))
+            Some(Self(handle))
         }
     }
 }
 
-impl Drop for SingleInstance {
+impl Drop for InstanceLock {
     fn drop(&mut self) {
         unsafe {
-            let _ = CloseHandle(self.handle);
+            let _ = CloseHandle(self.0);
         }
     }
 }
